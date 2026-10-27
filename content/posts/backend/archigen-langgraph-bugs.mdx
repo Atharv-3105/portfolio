@@ -1,0 +1,133 @@
+---
+title: "My LangGraph pipeline \"worked\". Then I found five bugs in it."
+description: "Bugs hiding behind a working LangGraph demo: a retry counter that defaulted to a list, a misplaced validator, a primary key that broke on day two, and a Docker-only f-string."
+section: backend
+date: "2026-10-25"
+project: "ArchiGen AI"
+repo: "https://github.com/Atharv-3105/ArchiGen-AI"
+stack: ["Python", "FastAPI", "LangGraph", "Groq", "SQLite", "Docker"]
+tags: ["langgraph", "sse", "sqlite", "debugging", "agents"]
+level: intermediate
+tldr: "A pipeline that produces correct output on the happy path can still have broken retry logic, a misplaced validation step and schema bugs that only show up on day two. Test the failure paths on purpose, and run locally on the same Python version as your container."
+status: "Deployed (Render + Vercel)"
+---
+
+ArchiGen takes something like "a URL shortener with a Redis cache and Postgres" and gives you back an editable Excalidraw architecture diagram plus an ADR. The flow is a LangGraph state machine:
+
+```text
+Parser (LLM) → Architecture (LLM) → Layout (Graphviz) → Style → Validator
+     → pass: Annotation (LLM) → Export
+     → fail: Repair (LLM) → Layout   (max 3 times)
+```
+
+One rule I followed from the start: **the LLM only decides the logical structure** (which components exist and what talks to what). Positions come from Graphviz's `dot` layout, and the validator is plain Python. I didn't want an LLM in places where a deterministic function does the job better, faster and for free.
+
+It demoed fine. The bugs below were hiding behind that "fine".
+
+## The problem
+
+A multi-step LLM pipeline has a lot of paths that a demo never touches. The happy path (parse → layout → validate → export) gets exercised every time you click Generate. The repair loop, the retry cap, the rate limiter on a user's second day, the production container: none of them run unless something goes wrong, so nothing tells you they're broken.
+
+## What I tried first
+
+The validator checks the generated Excalidraw elements with plain code. Every arrow's `startBinding`/`endBinding` has to point at an element that exists, every text label's `containerId` has to point at a rectangle, and no two boxes may overlap (an O(n²) bounding-box check, which is fine for diagrams with a few dozen nodes).
+
+If validation fails, a conditional edge sends the state to Repair: an LLM that gets the original intent, the current graph as JSON and the validator's error list, and returns a corrected graph that goes back through layout. A counter stops it after 3 attempts. If it still fails, the user gets an error instead of a broken diagram. I chose "correct or nothing" on purpose. A diagram with arrows pointing at nothing is worse than an honest "try again".
+
+```python title="backend/graph/graph.py"
+def route_after_validator(state: ArchitectureState):
+    errors = state.get("validation_errors", [])
+    attempts = state.get("repair_attempts", 0)
+
+    if errors and attempts < 3:
+        return "repair"
+    if errors and attempts >= 3:
+        return "end"
+    return "annotation"
+```
+
+That's what it looks like **now**. Here's how it got there.
+
+## What broke, and why
+
+**1. The retry counter defaulted to a list.** The first version read `state.get("repair_attempts", [])`. If the key is missing, `attempts` is `[]`, and `[] < 3` isn't something Python 3 will compare. It raises `TypeError`. So the one piece of code meant to handle failure would itself crash the moment it ran without that key in the state. The happy path never called it, so I never saw it.
+
+**2. The validator was in the wrong place.** The original edges were:
+
+```python
+workflow.add_edge("style", "annotation")
+workflow.add_edge("annotation", "export")
+workflow.add_edge("export", "validator")
+workflow.add_edge("annotation", "validator")
+```
+
+So validation ran *after* the annotation agent had already added sticky notes, and after export. The pass branch returned `"end"`, which means annotation wasn't part of the "validated" flow at all. The check was looking at a decorated diagram instead of the core structure it was supposed to protect.
+
+**3. The rate-limit table broke on day two.** Free users get 5 generations a day. The table was:
+
+```sql
+CREATE TABLE rate_limits (user_id TEXT PRIMARY KEY, date TEXT, count INTEGER)
+```
+
+The increment code looked for a row with `user_id = ? AND date = today`. On a user's first day there's no row, so it inserts one. On their second day there's still no row *for today*, so it tries to insert again, and the primary key on `user_id` alone rejects it. Day one always works, which is exactly the day you test.
+
+**4. An f-string that only failed in Docker.** This line was fine on my machine:
+
+```python
+logger.warning(f"Ambiguities Detected: {state["ambiguities"]}. Pass for now")
+```
+
+Reusing the same quote type inside an f-string is only legal from Python 3.12 (PEP 701). The backend image is `python:3.11-slim`, where it's a `SyntaxError`. It showed up on deploy day, along with Dockerfile path fixes (`COPY requirements.txt .` → `COPY backend/requirements.txt .`).
+
+**5. A 50 ms sleep for a "race condition".** When I moved from `graph_app.invoke(...)` to streaming each node's result over Server-Sent Events, I added this:
+
+```python
+# Add 50ms delay to ensure NO RACE CONDITIONS BETWEEN FRONTEND AND BACKEND
+await asyncio.sleep(0.05)
+```
+
+It's still in `main.py`. The frontend's stream reader already splits on `\n\n` and keeps the incomplete tail in a buffer, so merged chunks are handled. The sleep is a workaround, not a fix. If you're copying this pattern, don't copy the sleep.
+
+## The fix
+
+- **Counter:** default to `0`, and make the route function the only place that reads it.
+- **Graph wiring:** validate the core diagram first, then decorate it:
+
+```python title="backend/graph/graph.py"
+# Validate the CORE diagram before we add sticky notes
+workflow.add_edge("style", "validator")
+workflow.add_conditional_edges("validator", route_after_validator,
+    {"repair": "repair", "annotation": "annotation", "end": END})
+workflow.add_edge("annotation", "export")
+workflow.add_edge("export", END)
+```
+
+- **Rate limit:** a composite key and an upsert, so "first request today" and "another request today" are the same statement:
+
+```sql title="backend/database.py"
+CREATE TABLE IF NOT EXISTS rate_limits (
+    user_id TEXT, date TEXT, count INTEGER,
+    PRIMARY KEY (user_id, date)
+);
+
+INSERT INTO rate_limits (user_id, date, count) VALUES (?, ?, 1)
+ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1;
+```
+
+- **f-string:** use single quotes inside (`{state['ambiguities']}`). The real fix is running the same Python version locally as in the container.
+
+## What I'd do differently
+
+**Give Repair the geometry, or take overlaps away from it.** Repair gets error text, not coordinates. That makes it good at fixing a bad edge id ("arrow points at `cache_1`, which doesn't exist") and bad at fixing overlaps, because it can't see where anything is. Overlaps are a layout problem, and layout is deterministic, so the better fix is probably in Graphviz settings, not in a prompt.
+
+**Write tests for the failure paths first.** The README is upfront that there are no automated tests and no eval yet. Every bug above lived in a branch the happy path never takes: the retry route, the second-day insert, the container build. A test that feeds the validator a broken diagram would have caught #1 and #2 in seconds.
+
+**Make check-and-increment atomic.** The rate-limit check and the increment are still two separate statements, so a failed generation still uses up a credit. One transaction would fix both.
+
+## If you're stuck on this
+
+- If your agent has a retry loop, **force it to run**: feed it an input that always fails validation and confirm it stops at your cap and returns a clean error.
+- Draw your graph. LangGraph can render it (`graph.get_graph().draw_mermaid()`). Read the edges out loud. "Validate, then decorate" should be visible on the drawing.
+- Any table keyed per user per day needs **both** columns in the key. Test it by changing the date, not by clicking twice.
+- Pin your local Python to the container's version (`pyenv`, `uv python pin 3.11`), or build and run the container before you call it done.
+- If you add a `sleep` to fix a race, write down what the race actually was. If you can't, you haven't fixed it yet.

@@ -1,0 +1,105 @@
+---
+title: "The warning I almost scrolled past: a shape bug in my VQ-VAE loss"
+description: "My VQ-VAE commitment loss compared a [4,256,16,16] tensor with a [4,16,256,16] one, and PyTorch only warned. What the permute did, the fix, and a loss-weighting mix-up."
+section: ml
+date: "2026-10-25"
+project: "VQ-VAE"
+repo: "https://github.com/Atharv-3105/VQ-VAE"
+stack: ["PyTorch", "W&B"]
+tags: ["vq-vae", "pytorch", "debugging", "tensor-shapes", "generative-models"]
+level: beginner
+tldr: "F.mse_loss with mismatched shapes only warns, and when the shapes happen to broadcast you get no error at all, just a wrong loss. Print shapes on a dummy batch, assert them before every loss, and only permute a tensor whose layout you're sure of."
+status: "Done · 20 epochs on CIFAR-10"
+---
+
+A VQ-VAE is an autoencoder with a twist: instead of a continuous latent, the encoder's output at each spatial position is snapped to the nearest vector in a learned **codebook**. The decoder only ever sees codebook vectors. That's how you get discrete "image tokens", the same idea later image-generation models build on.
+
+My setup (August 2025): CIFAR-10 resized to 64×64, a conv encoder with residual and attention blocks, a codebook of 1,024 vectors of size 256, β = 0.25, batch 32, 20 epochs, logged to W&B.
+
+## The problem
+
+The quantizer is the only tricky part. The encoder gives you `z` with shape `[B, C, H, W]`. To find the nearest codebook vector for every position, you need one row per position, so you rearrange to `[B, H, W, C]` and flatten to `[B·H·W, C]`. Then you compute distances, pick the nearest codes, and reshape the result back to `[B, C, H, W]` for the decoder.
+
+So `z` ends up existing in two layouts in the same function. That's where I tripped.
+
+## What I tried first
+
+My first loss compared the quantized output with `z`, permuted "back" to channels-first:
+
+```python
+commitment_loss = F.mse_loss(quantized.detach(), z.permute(0, 3, 1, 2))
+```
+
+## What broke, and why
+
+Testing the quantizer on a dummy batch of 4, PyTorch printed this (straight from my W&B `output.log`):
+
+```text
+UserWarning: Using a target size (torch.Size([4, 16, 256, 16])) that is different
+to the input size (torch.Size([4, 256, 16, 16])). This will likely lead to
+incorrect results due to broadcasting. Please ensure they have the same size.
+  commitment_loss = F.mse_loss(quantized.detach(),z.permute(0,3,1,2))
+```
+
+It shows up three times in that log, once per re-run of the cell, and that log is only the first of five W&B runs I started between 06:40 and 07:20 that morning.
+
+The bug: `z` was **already** `[B, C, H, W]` = `[4, 256, 16, 16]`. Only my *copy* had been rearranged to channels-last. `permute(0, 3, 1, 2)` on the original moves dimensions around a second time:
+
+```text
+z                     [B, C,   H,  W] = [4, 256, 16, 16]
+z.permute(0, 3, 1, 2) [B, W,   C,  H] = [4, 16, 256, 16]   # nonsense layout
+```
+
+Here those two shapes can't broadcast at all, so at least something complained. The scary version is when the shapes *are* broadcastable, say `[B, C, H, W]` against `[B, 1, H, W]`. Then you get no error and no crash, just a loss that measures something other than what you meant, and a model that trains, badly, for reasons you'll never find in the loss curve.
+
+## The fix
+
+I added debug prints of both shapes (they're still in the notebook, commented out), then kept an untouched reference to the original tensor and compared against that:
+
+```python title="VQ-VAE.ipynb (VectorQuantizer.forward)"
+z_orig = z                                            # [B, C, H, W], never touched
+z_premuted = z.permute(0, 2, 3, 1).contiguous()       # [B, H, W, C]
+z_flat = z_premuted.view(-1, self.embedding_dim)      # [B*H*W, C]
+# ... nearest codebook vectors -> quantized: [B, C, H, W]
+
+commitment_loss = F.mse_loss(z_orig.detach(), quantized)
+embedding_loss  = F.mse_loss(z_orig, quantized.detach())
+loss = commitment_loss * self.beta + embedding_loss
+
+# Straight-through estimator: argmin has no gradient, so copy the
+# decoder's gradient straight through to the encoder
+quantized_for_decoder = z_orig + (quantized.clone() - z_orig).detach()
+```
+
+Training loss went from **0.1333** after epoch 1 to **0.0061** after epoch 20.
+
+## What I'd do differently
+
+**Assert shapes instead of printing them.** `assert quantized.shape == z_orig.shape, (quantized.shape, z_orig.shape)` costs nothing and fails loudly, including in the broadcastable case where PyTorch stays quiet.
+
+**Name tensors by layout.** `z_bchw` and `z_bhwc` instead of `z` and `z_premuted`. You can't permute the wrong one if the name tells you what it is.
+
+**Match the paper's loss terms.** The VQ-VAE paper's loss is:
+
+```text
+L = ||sg[z_e] − e||²  +  β · ||z_e − sg[e]||²
+     codebook loss        commitment loss
+```
+
+β = 0.25 belongs on the term that pulls the **encoder** toward its code (`z_e` with gradient, the codebook detached). In my code the names are the other way round: `commitment_loss = mse(z_orig.detach(), quantized)` is actually the codebook term, and that's the one multiplied by β. It trains, but it isn't the paper's weighting. That's the next fix:
+
+```python
+codebook_loss   = F.mse_loss(quantized, z_orig.detach())   # moves the codebook
+commitment_loss = F.mse_loss(z_orig, quantized.detach())   # moves the encoder
+loss = codebook_loss + self.beta * commitment_loss
+```
+
+**Keep the README honest.** It currently says the final loss is "~0.061". The notebook says 0.0061. One wrong decimal place, ten times off.
+
+## If you're stuck on this
+
+- **Run every new module on a tiny dummy batch first** and print every intermediate shape. Two minutes now saves an evening later.
+- **Never ignore a PyTorch `UserWarning` about sizes.** It's not noise. It means two tensors don't line up.
+- When a function holds the same tensor in two layouts, **keep the original untouched** and only ever permute copies.
+- Know when you need `.contiguous()`: `view` needs contiguous memory, and `permute` doesn't give you that.
+- For VQ-VAE specifically, the three things that go wrong are the shape bookkeeping above, which term gets β, and the straight-through estimator. Check all three against the paper's equations, not against a blog post (including this one).

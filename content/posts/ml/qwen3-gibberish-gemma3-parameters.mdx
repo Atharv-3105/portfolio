@@ -1,0 +1,127 @@
+---
+title: "18,099 seconds of gibberish: loading real weights into my own Qwen3 and Gemma 3"
+description: "I loaded official Qwen3 and Gemma 3 weights into my own PyTorch modules. Qwen took 5 hours to print garbage; Gemma claimed 436M parameters. Both were about where weights land."
+section: ml
+date: "2026-10-25"
+project: "Language Model Implementations"
+repo: "https://github.com/Atharv-3105/Language_Model_Implementations"
+stack: ["PyTorch", "safetensors", "Hugging Face Hub"]
+tags: ["llm", "from-scratch", "weight-loading", "gqa", "rope"]
+level: intermediate
+tldr: "Shape checks can't catch a weight loaded into the wrong layer, because every layer has the same shapes. Compare against a reference on a tiny input before generating anything long. And 'weight tying' by copying a tensor doubles the parameter count: tie by sharing the same Parameter."
+status: "Educational reproductions"
+---
+
+`Language_Model_Implementations` is where I rebuild LLMs piece by piece in PyTorch: LLaMA-2, Qwen3-0.6B, Gemma 3 270M and a small LM I trained myself. For Qwen3 and Gemma 3 I didn't train anything. I wrote the architecture by hand (RMSNorm, RoPE, grouped-query attention, QK-norm, SwiGLU), downloaded the official weights, poured them into my modules and asked the model to talk.
+
+If you want a walkthrough of the same exercise, Sebastian Raschka's *LLMs-from-scratch* repo has standalone Qwen3 and Gemma 3 notebooks, and my notebooks follow a very similar structure.
+
+## The problem
+
+Loading a checkpoint into your own model means mapping every tensor name in the file (`model.layers.12.self_attn.q_proj.weight`) to the right attribute in your code (`model.blocks[12].att.W_query.weight`). Qwen3-0.6B has 28 layers with about a dozen tensors each. Get one mapping wrong and nothing crashes. You just get a model that talks nonsense.
+
+## What I tried first
+
+A loader that checks shapes before every assignment:
+
+```python title="Qwen-3-0.6B/model.ipynb"
+def assign(left, right, tensor_name = "unkown"):
+    if left.shape != right.shape:
+        raise ValueError(f"Shape Mismatch in tensor '{tensor_name}'. Left: {left.shape}, Right: {right.shape}")
+    return torch.nn.Parameter(right.clone().detach())
+```
+
+Then a plain greedy `generate()` with no KV cache, on CPU, asking for 150 tokens: *"Give me a nice thought about Success"*.
+
+## What broke, and why
+
+This is the saved output of that cell:
+
+```text
+Time: 18099.13 sec
+<|im_start|>assistant)})うちにastaıyla่อง))+跋feltıylaัง đang年级左右跋mk多年前cup再说++
+... tslint tslint tslint tslint tslint)return ******************************
+```
+
+Five hours for 150 tokens of Japanese, Thai, Chinese and `tslint`.
+
+**Why it was slow:** no KV cache, so every new token recomputes attention over the whole sequence, and a 0.6B model in bf16 running on CPU. Expected, just painful.
+
+**Why it was gibberish:** look at the loop in the loader cell as it's saved in the notebook:
+
+```python title="Qwen-3-0.6B/model.ipynb (loader)"
+for l in range(model_config["n_layers"]):
+    block = model.trf_blocks[1]      # <- a literal 1, not l
+    att = block.att
+    att.W_query.weight = assign(att.W_query.weight,
+        params[f"model.layers.{l}.self_attn.q_proj.weight"], ...)
+```
+
+Every layer's weights get written into block 1, one after another. Block 1 ends up with layer 27's weights, and the other 27 blocks keep their random initialization. And the shape check passes every single time, because all 28 blocks have *identical* shapes. Shape checking catches "wrong tensor". It can't catch "right tensor, wrong place".
+
+One honest caveat: that cell was edited after the run (the notebook shows it without an execution count), so I can't prove from the notebook alone that this exact line produced that exact output. But a `1` where an `l` should be is precisely the kind of bug that produces fluent-looking garbage.
+
+**A month later, Gemma 3 270M worked**, with the loader doing `block = model.blocks[l]`:
+
+```text
+Machine Learning is a powerful and versatile field of computer science that
+enables computers to learn from data without explicit programming...
+```
+
+(It even answered with a typo in my chat template, `<start_of_tur>user`. Small models are forgiving about some things.)
+
+Then the notebook printed this:
+
+```text
+Total number of parameters: 435,870,336
+```
+
+A model called **270M** with **436M** parameters. The difference is the output head. Gemma's vocabulary is 262,144 tokens and its embedding size is 640, so the embedding matrix alone is `262,144 × 640 = 167,772,160` parameters. The real model *ties* the output head to the embedding: it's the same matrix used twice. My model has a separate `out_head`, and the loader fills it like this:
+
+```python title="Gemma-3-270M/model.ipynb (loader)"
+elif "model.embed_tokens.weight" in params:
+    # Weight tying: reuse the embedding weights
+    model.out_head.weight = assign(model.out_head.weight,
+                                   params["model.embed_tokens.weight"], ...)
+```
+
+`assign` returns `Parameter(right.clone())`, a **copy**. Same values, separate memory. So:
+
+```text
+435,870,336 − 167,772,160 = 268,098,176
+```
+
+That's the real 270M. It matches what Hugging Face reports in my Gemma fine-tuning repo exactly: 268,835,456 total with LoRA, minus 737,280 LoRA parameters = 268,098,176.
+
+## The fix
+
+- **Loop variable:** `model.blocks[l]`, which the Gemma notebook does correctly. (The Qwen notebook in the repo still has the `[1]` as of this post.)
+- **Real weight tying:** share the Parameter object instead of copying the tensor:
+
+```python
+model.out_head.weight = model.tok_emb.weight   # same tensor, counted once
+```
+
+- **Count unique parameters**, which my Qwen notebook already did and my Gemma notebook didn't:
+
+```python
+total = sum(p.numel() for p in model.parameters())   # PyTorch dedups shared Parameters
+```
+
+## What I'd do differently
+
+**Test against a reference before generating anything.** Load the Hugging Face model, feed both models the same 3-token input, and compare the logits with `torch.allclose(..., atol=1e-3)`. That takes seconds and would have caught the loader bug before a five-hour run. If the final logits don't match, compare layer by layer to find where they first diverge.
+
+**Check that every checkpoint key was used exactly once.** Keep a set of the keys you consumed and assert it equals `set(params.keys())`. With the `[1]` bug, every key was consumed, but every write landed on the same block, so also assert that each block's weights differ from the next block's.
+
+**Generate 5 tokens first, not 150.** If 5 tokens are gibberish, 150 will be too.
+
+**Add a KV cache before trying long generations on CPU.**
+
+## If you're stuck on this
+
+- **Fluent nonsense with no error** almost always means weights are in the wrong place (wrong layer, transposed, or never loaded), not wrong math.
+- **Print a fingerprint per layer**: `block.att.W_query.weight.float().norm()` for every block. If two consecutive layers have identical norms, or some layers look like random init, you've found it.
+- **Parameter count bigger than the model's name?** Check for an untied output head: subtract `vocab_size × emb_dim` and see whether the number makes sense.
+- **Check the chat template** against the tokenizer's real special tokens, character for character.
+- **Read the config, not the paper.** Gemma 3 270M uses sliding-window attention (512 tokens) on 5 of every 6 layers, a single KV head and a different RoPE base for local and global layers. None of that is guessable from "it's a transformer".

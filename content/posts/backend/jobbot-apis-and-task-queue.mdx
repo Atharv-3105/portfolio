@@ -1,0 +1,111 @@
+---
+title: "I lost to a bot wall, so I stopped scraping job boards"
+description: "Getting a browser past bot protection was a losing fight. Public ATS APIs were the answer, and the real work moved into the Telegram bot's task queue."
+section: backend
+date: "2026-10-25"
+project: "JobBot"
+repo: "https://github.com/Atharv-3105/JobBot"
+stack: ["Python", "asyncio", "httpx", "LangGraph", "SQLite", "Telegram"]
+tags: ["python", "asyncio", "queues", "apis", "rate-limiting"]
+level: beginner
+tldr: "Before you scrape a site, check whether the data has an API. Greenhouse, Lever and Ashby all publish open job-board APIs. Then give your background queue a size limit, a dedup key that identifies the actual work, a way to expire stuck tasks, and a retry loop that eventually gives up."
+status: "~80% done"
+---
+
+I graduated in 2026 and, like everyone else that year, spent months in the same loop: open a job board, read a JD, decide if it's worth it, tweak my résumé, repeat. Somewhere around the fortieth application I started automating the purely mechanical parts. That became JobBot, a Telegram bot that crawls job boards, scores listings against the skills I actually have, and tailors my LaTeX résumé for the ones that fit.
+
+It doesn't auto-apply. I dropped that idea on purpose: filling other companies' forms automatically felt wrong, and driving a browser through every form added a lot of time per job.
+
+## The problem
+
+Two problems, really.
+
+1. **Getting job listings without getting blocked.** The obvious approach is to point a headless browser at a big job site and read the listings.
+2. **Running slow work behind a chat bot.** Crawling, LLM scoring and LaTeX compiling take tens of seconds per job. A Telegram handler can't just sit there, and users (me) will spam the same command while waiting.
+
+## What I tried first
+
+For listings, I tried the browser route first, and ran straight into bot protection (DataDome). I tried what everyone tries: residential proxies, simulating human behaviour (random delays, typing speed, scrolling), headless and headed browsers. None of it became something I could trust to run unattended. Bot protection is literally a team whose job is to beat you, and they get to update their side whenever they want.
+
+For the bot, the first task queue was the simplest thing that works:
+
+```python title="bot/worker.py (first version)"
+self._queue = asyncio.Queue()           # no size limit
+self._active_tasks: Set[str] = set()    # for de-duplication
+
+hash_input = f"{self.user_id}:{self.task_type}:{self.initial_state.get('keyword', '')}"
+self.task_id = hashlib.md5(hash_input.encode()).hexdigest()
+```
+
+## What broke, and why
+
+**Scraping was the wrong fight.** The breakthrough wasn't a better stealth trick. It was noticing that a lot of startups host their careers pages on an applicant tracking system (Greenhouse, Lever, Ashby), and **those publish public, unauthenticated job-board APIs**. Same data, as JSON, with no browser involved.
+
+Even with clean JSON, matching was harder than expected. My Lever crawler first matched the search keyword against title + description, and that's far too loose: a "backend" keyword matches plenty of descriptions for jobs that aren't backend jobs. It now matches against the title only. The Greenhouse crawler needed its location extraction fixed too.
+
+**The queue had three holes.**
+
+- **No size limit.** `asyncio.Queue()` without `maxsize` grows forever. One impatient user can queue as much work as they like.
+- **The dedup key described the wrong thing.** It was built from the search *keyword*. For scoring or tailoring a specific job, the keyword says nothing about *which* job, so it can't tell two different jobs apart.
+- **A set never forgets.** If a task died before reporting done, its key stayed in `_active_tasks` forever, and that exact request was treated as a duplicate from then on.
+
+**The LLM router could loop forever.** JobBot rotates between free LLM providers (OpenRouter, Groq, Gemini, Cerebras). When all of them were rate-limited, the router waited 30 seconds and tried again, with no limit on how many times. In the middle of one session, the free OpenRouter model in my first slot (an NVIDIA Nemotron) became unavailable.
+
+## The fix
+
+**Use the APIs.** Each crawler is a small `httpx` client behind a shared `BaseCrawler` interface:
+
+```python title="portals/greenhouse.py (trimmed)"
+BASE_URL = "https://boards-api.greenhouse.io/v1/boards"
+
+url = f"{BASE_URL}/{slug}/jobs"
+response = await client.get(url, params={"content": "true"})
+response.raise_for_status()
+
+for job in response.json().get("jobs", []):
+    title = job.get("title", "")
+    if not self._keyword_match(title, keyword):   # cheap check first
+        continue
+    jd_text = self._html_to_text(job.get("content", ""))
+```
+
+Lever (`api.lever.co/v0/postings/{company}`) and Ashby (`api.ashbyhq.com/posting-api/job-board/{company}`) work the same way. Today JobBot reads 8 sources. Only Wellfound still needs a browser, because it's the one portal without a public API, and unsurprisingly it's also the most fragile one.
+
+**Bound, key and expire the queue.**
+
+```python title="bot/worker.py"
+self._queue = asyncio.Queue(maxsize=maxsize)        # 20
+self._active_tasks: Dict[str, float] = {}           # dedup_key -> enqueue time
+
+# search: user + task + keyword; score/tailor: user + task + job URL
+job_url = self.initial_state.get('raw_jobs', [{}])[0].get('url', '')
+hash_input = f"{self.user_id}:{self.task_type}:{job_url or self.initial_state.get('keyword', '')}"
+
+# on every enqueue: forget tasks older than 10 minutes
+stale = [k for k, ts in self._active_tasks.items() if now - ts > 600]
+```
+
+Two workers pull from the queue, so one slow tailoring job doesn't block everyone. Every task releases its key in a `finally`. I'm keeping the comment exactly as I wrote it:
+
+```python
+finally:
+    #Always mark task as done to prevent queue deadlockkkkk
+    job_queue.task_done(task.dedup_key)
+```
+
+**Make the router give up.** After 3 full cycles with every provider exhausted, it raises instead of looping, and the user gets a "try again in a minute" message. OpenRouter now has three free models in rotation, so one model disappearing doesn't take out the whole provider.
+
+## What I'd do differently
+
+- **Check for an API before writing a single line of scraping code.** "Does this data already exist as JSON somewhere?" is now my first question for any crawler.
+- **Cancel queued tasks properly.** `/cancel` stops a running task through its `cancel_event`, but a task still waiting in the queue is only removed from the tracking dict; the item stays in the `asyncio.Queue` and a worker will still pick it up. My own code comment admits it: removing items from an async queue "will be added in FUTURE". The fix is for workers to check a cancelled-keys set before starting a task.
+- **Fix the ETA string.** The queue tells users `~{s // 60}m {s}s`, so 90 seconds shows as "~1m 90s". It should be `s % 60`. Small, but it's the first thing a user reads.
+
+## If you're stuck on this
+
+- Look at the URL of the careers page. `boards.greenhouse.io/<company>`, `jobs.lever.co/<company>` or `jobs.ashbyhq.com/<company>` means there's a public JSON API behind it.
+- Match keywords on titles. Descriptions mention every technology under the sun.
+- Every `asyncio.Queue` that takes user input needs a `maxsize`.
+- Build dedup keys from what makes the work unique (user + action + target), not from whatever field was handy.
+- Anything you add to a "currently running" set needs a guaranteed removal (`finally`) **and** an expiry, for the day the `finally` doesn't run.
+- Every retry loop needs a maximum. "Wait 30 s and try again" with no limit is a hang with extra steps.

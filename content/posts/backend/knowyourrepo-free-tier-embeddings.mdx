@@ -1,0 +1,105 @@
+---
+title: "Embedding a whole codebase on 50 free requests a day"
+description: "On free embedding tiers the limit is requests, not tokens. Two limiters on one key, a quota that failed good repos, one GIF in a test file, and a swapped worker pool."
+section: backend
+date: "2026-10-25"
+project: "KnowYourRepo"
+repo: "https://github.com/Atharv-3105/KnowYourRepo"
+stack: ["Go", "Python", "FastAPI", "Postgres", "pgvector", "OpenRouter"]
+tags: ["go", "rate-limiting", "embeddings", "free-tier", "concurrency"]
+level: intermediate
+tldr: "On a free tier, budget requests, not tokens: pack 128 chunks into each call, share one limiter per API key, save progress after every batch so a run can resume tomorrow, and never let one bad input fail a whole batch."
+status: "In progress"
+---
+
+KnowYourRepo: you paste a GitHub URL, and it clones the repo, parses it with Tree-sitter, builds a call graph, embeds every function-sized chunk, and lets you chat with the codebase with file-and-line citations. A Go service does ingestion and retrieval. A Python FastAPI sidecar owns embeddings and LLM calls. Everything sits on Postgres + pgvector.
+
+I have one hard rule for side projects: **free tiers only**. No card on file. That rule turned out to be the most useful design constraint in this whole project.
+
+This stretch of the project (September 2026) was pair-programmed with Claude, and the commit messages say so. The bugs and the constraints were very real either way.
+
+## The problem
+
+A medium repo turns into hundreds or thousands of chunks (1,500 characters each, 200 overlap). Every chunk needs an embedding. Free embedding APIs mostly don't care how many *tokens* you send; they care how many *requests* you make:
+
+- Voyage's no-card tier: **3 requests/minute**, 10K tokens/minute.
+- OpenRouter's free embedding models: **20 requests/minute, 50 requests/day**.
+
+Fifty requests a day. If you send one chunk per request, you can embed fifty functions and then you're done until tomorrow.
+
+## What I tried first
+
+The first version (May 2026) ran Ollama's `nomic-embed-text` locally. The sidecar fired 32 single-text requests at once with `asyncio.gather`, and the Go handler collected every chunk in the repo and sent them in **one** batch call, inside the HTTP request, with a 10-minute client timeout:
+
+```go title="api/internal/api/repos.go (May 2026)"
+//Send 1 Batch Embedding Request only after processing all files
+err = h.sidecar.Embed(ctx, sidecar.EmbedBatchRequest{Items: embedItems})
+```
+
+So `POST /repos` didn't return until the whole repo was cloned, parsed and embedded. In September I moved ingestion to a background worker pool (the endpoint now returns `202` and the frontend polls job status), and switched embeddings to Voyage.
+
+## What broke, and why
+
+**1. Two limiters, one API key.** I added an `AsyncLimiter` to respect Voyage's 3 RPM, and still got 429s. The provider was created at module level in *both* `embed.py` and `search.py`, so each route got its own `VoyageProvider` with its own limiter. Two "3 RPM" limiters that don't share state let combined traffic reach 6 RPM against a key that allows 3.
+
+**2. Voyage couldn't embed a real repo.** Even when throttled correctly, 3 requests a minute isn't enough to ingest anything interesting, and adding a payment method was off the table. So I moved to OpenRouter, which gives more per minute but only 50 per day.
+
+**3. Running out of quota marked a good repo as "failed".** Ingestion has two halves: parse (clone, Tree-sitter, call graph) and embed. If embedding hit the daily limit, the job returned early with an error. The repo had a complete call graph and was perfectly usable for structural questions, but it showed as failed, and the overview step after embedding silently never ran.
+
+**4. One GIF killed a batch.** Ingesting `psf/requests`, embedding stopped after **512 of 750 chunks**. Its test suite contains a `data:image/gif` literal. OpenRouter's server treats text like a base64 data URI or an image URL as an *image* input, and rejected the entire batch with a 400.
+
+**5. 16 workers and a queue of 2.** This one's just embarrassing. The worker pool's constructor was `NewPool(bufferSize, size int, ...)`. The call site passed `(IngestionWorkerCount, IngestionQueueSize)`, which is 2 and 16. Both are `int`, so the compiler was perfectly happy. For 24 days the pool ran **16 concurrent ingestions with a queue of 2**, which is the exact opposite of what you want when every ingestion is competing for 20 requests a minute.
+
+## The fix
+
+**One provider per process, so one limiter per key.** `lru_cache(maxsize=1)` turns the factory into a singleton, and every route shares the limiter, the daily budget and the query-embedding cache:
+
+```python title="extraction-service/app/providers/factory.py"
+@lru_cache(maxsize=1)
+def get_embed_provider() -> EmbedProvider:
+    # A singleton: the rate limiter, daily request budget and query cache
+    # only work if /embed and /search share one instance - OpenRouter's
+    # limits are per account, not per route.
+    return OpenRouterEmbedProvider(...)
+```
+
+**Spend requests, not tokens.** Every request carries up to 128 chunks, and a repo is capped at 1,024 chunks. That makes a full repo at most **8 requests**, so 50 a day is about six repos instead of fifty functions. A client-side daily budget fails fast with a `429` and `Retry-After` instead of burning retries against a quota that's already gone.
+
+**Save progress after every batch.** The Go side embeds in bounded batches and returns how many items succeeded, so the caller can mark exactly those files as done:
+
+```go title="api/internal/api/ingestion_guardrails.go (trimmed)"
+for start := 0; start < len(items); start += size {
+	end := min(start+size, len(items))
+	if err := h.sidecar.Embed(ctx, sidecar.EmbedBatchRequest{Items: items[start:end]}); err != nil {
+		return start, fmt.Errorf("embedding batch %d-%d of %d failed: %w", start, end, len(items), err)
+	}
+}
+return len(items), nil
+```
+
+Each file also records which embedding model fully embedded it (`files.embedded_model`), so tomorrow's sync skips finished files and picks up where the quota ran out. Parse status and embed status are tracked separately, so a repo can be "parsed: done, embedded: partial" instead of "failed". Chat also falls back to lexical and call-graph search when embeddings are missing.
+
+**Isolate the bad input.** Strip known image-like strings before embedding, and if the server still rejects a batch, split it in half and retry until the one bad chunk is found:
+
+```python title="extraction-service/app/providers/openrouter_embed_provider.py"
+except _UnembeddableInput:
+    if len(inputs) > 1:
+        mid = len(inputs) // 2
+        return await self._embed_many(inputs[:mid], kind) + await self._embed_many(inputs[mid:], kind)
+```
+
+**Name your parameters.** The pool is now `NewPool(workers, queueSize int, ...)`, it logs both values at startup, and `INGESTION_WORKERS` defaults to 1, because there's no point running several ingestions in parallel against a 20 RPM limit.
+
+## What I'd do differently
+
+- **Design for the request budget on day one.** I designed for "embed everything", then bolted on limits as each provider pushed back. If I'd started with "I get 50 calls a day; what does one call need to carry?", batching, resumability and partial status would have been the architecture instead of patches.
+- **Treat "partially done" as a real state from the start.** "Succeeded or failed" was too simple for a job whose second half can run out of quota.
+- **Never put two same-typed positional arguments next to each other.** `NewPool(2, 16)` reads fine and means the wrong thing. A small config struct (`PoolConfig{Workers: 1, QueueSize: 16}`) makes the call site impossible to swap.
+
+## If you're stuck on this
+
+- Getting 429s even though you added a rate limiter? Check how many **instances** of the client exist. Limits are per API key, so the limiter has to be too.
+- Read the free tier's limits and work out how many requests one full job costs. If it's more than your daily quota, batching isn't optional.
+- Return "how many succeeded" from batch loops, not just an error, so the caller can resume.
+- When one input can fail a batch, bisect. It costs about `log2(batch)` extra calls, only when something actually fails.
+- If a struct or function takes two `int`s in a row, log them at startup. You'll catch a swap in the first run instead of the twenty-fourth day.

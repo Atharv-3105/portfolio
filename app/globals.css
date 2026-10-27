@@ -1,0 +1,338 @@
+@import "tailwindcss";
+
+/* ---- Design tokens (dark theme only) ---- */
+@theme {
+  --color-canvas: #0b0d10; /* page background */
+  --color-surface: #12161b; /* cards, TL;DR, code title bar */
+  --color-raised: #0f1216; /* hero visual panel */
+  --color-codebg: #07090b; /* code blocks */
+  --color-line: #1f242b; /* hairlines */
+  --color-line-strong: #2e353e; /* chips, outlined buttons */
+  --color-ring-dim: #252b33;
+  --color-fg: #e6e8eb; /* primary text */
+  --color-fg-soft: #d2d7dd; /* TL;DR, stuck box, code text */
+  --color-fg-muted: #b4bcc5; /* body copy */
+  --color-fg-subtle: #9aa3ad; /* labels, meta */
+  --color-fg-faint: #8a939d; /* captions on raised panels */
+  --color-accent: #f5a524; /* amber */
+  --color-accent-hover: #ffc861;
+  --color-stuck: #16130d; /* "If you're stuck" callout */
+  --color-stuck-line: #3d3020;
+  --color-active: #1a1610; /* active nav / sidebar item */
+}
+
+@theme inline {
+  --font-sans: var(--font-space-grotesk), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  html {
+    background: var(--color-canvas);
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    background: var(--color-canvas);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  a {
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+  a:hover {
+    color: var(--color-accent-hover);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
+  }
+  ::selection {
+    background: var(--color-accent);
+    color: var(--color-canvas);
+  }
+  h1,
+  h2,
+  h3,
+  [id] {
+    scroll-margin-top: 24px;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    html {
+      scroll-behavior: smooth;
+    }
+  }
+}
+
+/* ---- Journal post body (MDX output) ---- */
+@layer components {
+  .prose-journal {
+    font-size: 18px;
+    line-height: 1.75;
+    color: var(--color-fg-muted);
+    overflow-wrap: break-word;
+  }
+  .prose-journal > * {
+    margin: 0;
+  }
+  .prose-journal > * + * {
+    margin-top: 20px;
+  }
+  .prose-journal h2.journal-h2 {
+    margin-top: 48px;
+    font-size: 26px;
+    line-height: 1.25;
+    font-weight: 600;
+    color: var(--color-fg);
+  }
+  .prose-journal > h2.journal-h2:first-child {
+    margin-top: 8px;
+  }
+  .prose-journal .h2-num {
+    color: var(--color-accent);
+    font-family: var(--font-mono);
+    font-size: 15px;
+    margin-right: 12px;
+  }
+  .prose-journal h3 {
+    margin-top: 32px;
+    font-size: 20px;
+    line-height: 1.35;
+    font-weight: 600;
+    color: var(--color-fg);
+  }
+  .prose-journal h4 {
+    margin-top: 24px;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--color-fg);
+  }
+  .prose-journal strong {
+    color: var(--color-fg);
+    font-weight: 600;
+  }
+  .prose-journal a {
+    text-decoration: underline;
+    text-decoration-color: rgb(245 165 36 / 0.45);
+    text-underline-offset: 3px;
+  }
+  .prose-journal a:hover {
+    text-decoration-color: currentColor;
+  }
+  .prose-journal ul,
+  .prose-journal ol {
+    padding-left: 22px;
+  }
+  .prose-journal ul {
+    list-style: disc;
+  }
+  .prose-journal ol {
+    list-style: decimal;
+  }
+  .prose-journal li + li {
+    margin-top: 6px;
+  }
+  .prose-journal li::marker {
+    color: var(--color-fg-subtle);
+  }
+  .prose-journal blockquote {
+    border-left: 2px solid var(--color-line-strong);
+    padding-left: 18px;
+    color: var(--color-fg-soft);
+  }
+  .prose-journal hr {
+    border: 0;
+    border-top: 1px solid var(--color-line);
+    margin: 40px 0;
+  }
+  .prose-journal :not(pre) > code,
+  .tldr code {
+    font-variant-ligatures: none;
+    font-family: var(--font-mono);
+    font-size: 0.8em;
+    color: var(--color-fg);
+  }
+
+  /* Code blocks (rehype-pretty-code). ```go title="ingest/embed.go" gives the filename bar. */
+  .prose-journal figure[data-rehype-pretty-code-figure] {
+    border: 1px solid var(--color-line);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--color-codebg);
+  }
+  .prose-journal [data-rehype-pretty-code-title] {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 16px;
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-line);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--color-fg-subtle);
+    overflow-wrap: anywhere;
+  }
+  .prose-journal [data-rehype-pretty-code-title]::after {
+    content: attr(data-language);
+    flex-shrink: 0;
+  }
+  .prose-journal pre {
+    margin: 0;
+    padding: 20px 0;
+    background: var(--color-codebg);
+    color: var(--color-fg-soft);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    line-height: 1.65;
+    overflow-x: auto;
+    tab-size: 4;
+    /* No ligatures: `<-` and `:=` should look exactly as typed. */
+    font-variant-ligatures: none;
+  }
+  .prose-journal pre > code {
+    display: grid;
+    min-width: max-content;
+    font-size: inherit;
+  }
+  .prose-journal pre [data-line] {
+    padding: 0 22px;
+  }
+  .prose-journal pre [data-highlighted-line] {
+    background: rgb(245 165 36 / 0.08);
+    box-shadow: inset 2px 0 0 var(--color-accent);
+  }
+  .prose-journal pre [data-highlighted-chars] {
+    background: rgb(245 165 36 / 0.16);
+    border-radius: 3px;
+  }
+  @media (max-width: 640px) {
+    .prose-journal pre {
+      font-size: 13px;
+      padding: 16px 0;
+    }
+    .prose-journal pre [data-line] {
+      padding: 0 16px;
+    }
+  }
+
+  /* Tables (GFM) */
+  .prose-journal .table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--color-line);
+    border-radius: 12px;
+  }
+  .prose-journal table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .prose-journal th,
+  .prose-journal td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--color-line);
+    white-space: nowrap;
+  }
+  .prose-journal th {
+    background: var(--color-surface);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color-fg-subtle);
+  }
+  .prose-journal tr:last-child td {
+    border-bottom: 0;
+  }
+
+  /* <Figure> */
+  .prose-journal .mdx-figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--color-line);
+    border-radius: 12px;
+  }
+  .prose-journal .mdx-figure figcaption {
+    margin-top: 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--color-fg-subtle);
+  }
+
+  /* <Callout> */
+  .prose-journal .callout {
+    border: 1px solid var(--color-line);
+    background: var(--color-surface);
+    border-radius: 12px;
+    padding: 16px 20px;
+    font-size: 16px;
+    line-height: 1.7;
+    color: var(--color-fg-soft);
+  }
+  .prose-journal .callout-warn {
+    border-color: var(--color-stuck-line);
+    background: var(--color-stuck);
+    box-shadow: inset 2px 0 0 var(--color-accent);
+  }
+  .prose-journal .callout-label {
+    margin: 0 0 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-fg-subtle);
+  }
+  .prose-journal .callout-warn .callout-label {
+    color: var(--color-accent);
+  }
+  .prose-journal .callout-body > * {
+    margin: 0;
+  }
+  .prose-journal .callout-body > * + * {
+    margin-top: 10px;
+  }
+
+  /* 06 "If you're stuck on this" (wrapped by lib/rehype-journal.ts) */
+  .prose-journal section.stuck {
+    margin-top: 40px;
+    border: 1px solid var(--color-stuck-line);
+    background: var(--color-stuck);
+    border-radius: 12px;
+    padding: 22px 24px;
+    font-size: 17px;
+    line-height: 1.75;
+    color: var(--color-fg-soft);
+  }
+  .prose-journal section.stuck > * {
+    margin: 0;
+  }
+  .prose-journal section.stuck > * + * {
+    margin-top: 12px;
+  }
+  .prose-journal section.stuck h2.journal-h2 {
+    margin-top: 0;
+    font-size: 22px;
+  }
+  .prose-journal section.stuck ul {
+    padding-left: 20px;
+  }
+  @media (max-width: 640px) {
+    .prose-journal {
+      font-size: 17px;
+    }
+    .prose-journal h2.journal-h2 {
+      font-size: 23px;
+    }
+    .prose-journal section.stuck {
+      padding: 18px 18px;
+    }
+  }
+}

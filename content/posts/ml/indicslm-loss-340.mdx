@@ -1,0 +1,106 @@
+---
+title: "My Hindi language model started at loss 340. It should have been 9.7."
+description: "A from-scratch Hindi/Marathi/English model on free Kaggle T4s. Default init plus tied embeddings made step-0 loss 35x too high, and GPT-2's regex split Devanagari words."
+section: ml
+date: "2026-10-25"
+project: "IndicSLM"
+repo: "https://github.com/Atharv-3105/IndicSLM-From-Scratch-"
+stack: ["PyTorch", "Kaggle T4", "BPE", "W&B"]
+tags: ["pretraining", "initialization", "tokenizers", "indic-nlp", "kaggle"]
+level: intermediate
+tldr: "Before any long run, check that step-0 loss is about ln(vocab size). If it's way higher, your init is wrong. With tied embeddings, PyTorch's default nn.Embedding std of 1 is a trap: use N(0, 0.02) and scale the residual projections."
+status: "Trained · DPO and eval done"
+---
+
+IndicSLM is a small decoder-only language model for Hindi, Marathi and English, trained on Indian government-scheme and legal text. Everything is from scratch: the data pipeline, a 16K byte-level BPE tokenizer, the model (RoPE, RMSNorm, SwiGLU, grouped-query attention, KV cache, tied embeddings), pretraining, SFT, DPO and an eval harness. Compute: free Kaggle T4s.
+
+I built it brick by brick with Claude Code as a pair programmer. The repo's code comments reference its `CLAUDE.md`, so that's no secret. The Kaggle runs, the crashes and the numbers below come from the actual runs.
+
+The config is tiny on purpose:
+
+```python title="model/config.py (trimmed)"
+vocab_size: int = 16_000
+d_model: int = 384
+n_layers: int = 10
+n_heads: int = 6            # query heads
+n_kv_heads: int = 2         # GQA, 3:1
+head_dim: int = 64
+ffn_hidden_dim: int = 1024
+max_seq_len: int = 512
+tie_embeddings: bool = True
+```
+
+## The problem
+
+Before burning GPU hours, I ran a short smoke test on real data. For a model that knows nothing, the loss at step 0 should be close to `ln(vocab_size)`: with 16,000 tokens, a uniform guess gives `ln(16000) ≈ 9.68`.
+
+Mine started at **~340 nats**, and the gradients exploded right after.
+
+## What I tried first
+
+Nothing special, which was the problem. The first version of `model.py` (7 Sep) used PyTorch's default initialization: `nn.Embedding` draws from N(0, 1), and `nn.Linear` uses Kaiming-uniform. With tied embeddings, the output layer reuses the embedding matrix, so the logits are `h @ E.T`.
+
+## What broke, and why
+
+**1. Default init + tied embeddings = absurdly confident logits.**
+
+With std 1 per dimension, each 384-dim embedding row has norm about `√384 ≈ 19.6`. The final RMSNorm scales the hidden state to about the same norm. Each logit is a dot product of two vectors of length ~19.6.
+
+Here's my back-of-envelope for why it lands near 340 and not somewhere random. The residual stream at init is dominated by the input token's own embedding, so the hidden state points roughly in the direction of the current token. Its logit for *that same token* is about `19.6 × 19.6 ≈ 384`. The model predicts "the next token is the current token" with enormous confidence. The real next token gets a logit near 0, so the loss is roughly 384 minus a bit. That matches the ~340–350 I saw.
+
+On top of that, every block adds its output straight into the residual stream, so variance grows with depth. That's a second, separate instability.
+
+**2. The tokenizer was splitting Hindi words inside letters.**
+
+My pretokenizer started from GPT-2's regex, which groups letters with `\p{L}+`. Devanagari vowel signs (matras like `ो` and `ा`) aren't category `L`; they're combining marks (`Mc`/`Mn`). So `\p{L}+` breaks words at every matra:
+
+```text
+"योजना"  →  ['य', 'ो', 'जन', 'ा']     # 4 pieces, split on the vowel signs
+```
+
+BPE can never learn a merge across a pretokenizer boundary, so the tokenizer would never learn whole Hindi syllables.
+
+## The fix
+
+The GPT-2 / nanoGPT recipe: N(0, 0.02) for every Linear and Embedding weight, plus an extra `1/√(2·n_layers)` for the two projections that write straight into the residual stream:
+
+```python title="model/model.py"
+def _init_weights(self, module: nn.Module) -> None:
+    if isinstance(module, (nn.Linear, nn.Embedding)):
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+def _scale_residual_projections(self) -> None:
+    residual_std = 0.02 / (2 * self.config.n_layers) ** 0.5
+    for name, module in self.named_modules():
+        if name.endswith("attn.out_proj") or name.endswith("ffn.down_proj"):
+            nn.init.normal_(module.weight, mean=0.0, std=residual_std)
+```
+
+With std 0.02, the embedding rows have norm about 0.39, the logits have a spread of about 0.4, the softmax is nearly uniform, and step-0 loss lands right at ~9.7.
+
+For the tokenizer, letters and marks are matched together:
+
+```python title="tokenizer/pretokenizer.py"
+# before: \p{L}+          after: [\p{L}\p{M}]+
+```
+
+## What I'd do differently
+
+**Assert step-0 loss in code.** One line, `assert abs(loss0 - math.log(vocab)) < 1.0`, before the training loop. It would have caught this in seconds instead of in a smoke test.
+
+**Be honest about scale from the start.** ~102M pretraining tokens for ~22M parameters is a 4.6:1 ratio. Chinchilla-optimal is about 20:1, so this model is knowingly undertrained, and the eval shows it. With greedy decoding it ends cleanly about 73% of the time but gets stuck in a loop on ~37% of prompts (Marathi is worst), and it got **0%** of scheme URLs right. On a quick check, DPO (lr 1e-6, β 0.1, untuned) didn't visibly beat the SFT model. I'd rather publish those numbers than hide them.
+
+**Treat Kaggle like flaky infrastructure, because it is.** Everything below happened to me:
+
+- **Never pick the P100.** The preinstalled PyTorch build doesn't support it: `cudaErrorNoKernelImageForDevice`.
+- **Run long jobs as committed batch runs**, not interactive sessions. An idle timeout killed a run and took a full set of checkpoints with it.
+- **Batch 16 at seq_len 1024 OOM'd on one T4**, so SFT ran with `DataParallel` on two T4s. That prefixes every saved key with `module.`. Save from the unwrapped model, or strip the prefix when you load.
+- **After an OOM, restart the kernel** before trying a smaller batch. The failed cell keeps its tensors alive.
+- **Zip outputs flat.** `FileLink` on nested `/kaggle/working/` folders 404'd on me unreliably.
+
+## If you're stuck on this
+
+- Step-0 loss far above `ln(V)`? Print the std of your embedding weight. If it's ~1.0 and the embeddings are tied, that's your answer.
+- Loss fine at first but exploding a few hundred steps in? Check the residual stream: log the RMS of the hidden state after each block.
+- Training on a non-Latin script? Run your pretokenizer on ten real words and *look* at the pieces before you train the tokenizer. If a single letter or vowel sign is its own piece, your regex is splitting on combining marks.
+- Loading a checkpoint fails with `Unexpected key(s) ... module.`? It was saved from a `DataParallel` wrapper. Strip the prefix: `{k.removeprefix("module."): v for k, v in sd.items()}`.
