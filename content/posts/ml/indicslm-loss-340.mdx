@@ -14,8 +14,6 @@ status: "Trained · DPO and eval done"
 
 IndicSLM is a small decoder-only language model for Hindi, Marathi and English, trained on Indian government-scheme and legal text. Everything is from scratch: the data pipeline, a 16K byte-level BPE tokenizer, the model (RoPE, RMSNorm, SwiGLU, grouped-query attention, KV cache, tied embeddings), pretraining, SFT, DPO and an eval harness. Compute: free Kaggle T4s.
 
-I built it brick by brick with Claude Code as a pair programmer. The repo's code comments reference its `CLAUDE.md`, so that's no secret. The Kaggle runs, the crashes and the numbers below come from the actual runs.
-
 The config is tiny on purpose:
 
 ```python title="model/config.py (trimmed)"

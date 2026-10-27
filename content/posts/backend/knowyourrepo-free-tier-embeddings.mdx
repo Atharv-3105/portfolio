@@ -16,8 +16,6 @@ KnowYourRepo: you paste a GitHub URL, and it clones the repo, parses it with Tre
 
 I have one hard rule for side projects: **free tiers only**. No card on file. That rule turned out to be the most useful design constraint in this whole project.
 
-This stretch of the project (September 2026) was pair-programmed with Claude, and the commit messages say so. The bugs and the constraints were very real either way.
-
 ## The problem
 
 A medium repo turns into hundreds or thousands of chunks (1,500 characters each, 200 overlap). Every chunk needs an embedding. Free embedding APIs mostly don't care how many *tokens* you send; they care how many *requests* you make:

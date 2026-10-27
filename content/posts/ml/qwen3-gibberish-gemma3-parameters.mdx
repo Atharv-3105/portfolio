@@ -14,7 +14,7 @@ status: "Educational reproductions"
 
 `Language_Model_Implementations` is where I rebuild LLMs piece by piece in PyTorch: LLaMA-2, Qwen3-0.6B, Gemma 3 270M and a small LM I trained myself. For Qwen3 and Gemma 3 I didn't train anything. I wrote the architecture by hand (RMSNorm, RoPE, grouped-query attention, QK-norm, SwiGLU), downloaded the official weights, poured them into my modules and asked the model to talk.
 
-If you want a walkthrough of the same exercise, Sebastian Raschka's *LLMs-from-scratch* repo has standalone Qwen3 and Gemma 3 notebooks, and my notebooks follow a very similar structure.
+**Credit where it's due:** my Qwen3 and Gemma 3 notebooks are built on Sebastian Raschka's standalone Qwen3 and Gemma 3 notebooks from [LLMs-from-scratch](https://github.com/rasbt/LLMs-from-scratch). The structure, the config dicts and the weight-loading approach follow his. The bugs below are all mine.
 
 ## The problem
 
