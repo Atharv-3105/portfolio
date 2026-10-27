@@ -44,9 +44,9 @@ export const site = {
   links: {
     github: "https://github.com/Atharv-3105",
     // TODO: add your profile URLs. Empty strings are hidden everywhere.
-    linkedin: "",
-    huggingface: "",
-    leetcode: "",
+    linkedin: "https://linkedin.com/in/atharv3105",
+    huggingface: "https://huggingface.co/Atharva31",
+    leetcode: "https://leetcode.com/atharvdwivedi8",
   },
   stack: [
     "Go",
@@ -111,7 +111,7 @@ export const site = {
   ] satisfies Project[],
   experience: [
     {
-      role: "Software Developer Intern",
+      role: "Associate Software Developer",
       org: "Helionyex Solutions",
       dates: "June 2026 – Present",
       location: "Remote",
