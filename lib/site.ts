@@ -1,21 +1,32 @@
 // Everything on the portfolio that is "content" lives here. Edit freely.
+//
+// Rule for this file: every claim should be checkable from a link next to it.
+// If a line can't point at a repo, a live app or a result file, cut it.
 
 /**
  * Canonical origin used for metadata, sitemap, RSS and Open Graph URLs.
  * Order: SITE_URL env var → Vercel production domain → default below.
- * TODO: change the default to your real domain once you have it.
  */
-const DEFAULT_SITE_URL = "https://atharva.vercel.app";
+const DEFAULT_SITE_URL = "https://portfolio-gamma-lilac-65.vercel.app";
 export const SITE_URL = (
   process.env.SITE_URL ||
   (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "") ||
   DEFAULT_SITE_URL
 ).replace(/\/+$/, "");
 
+export type ProofLink = { label: string; href: string };
+
 export type Project = {
   name: string;
-  tag: string;
-  description: string;
+  /** One sentence: what it does, in plain words. */
+  what: string;
+  /** The one engineering problem that made it hard, and what I did about it. */
+  hard: string;
+  /** How I checked that it works: live app, test results, published numbers. */
+  proof: string;
+  proofLinks: ProofLink[];
+  /** What's still broken, taken from the project's own README or results. */
+  broken: string;
   stack: string[];
   repo: string;
 };
@@ -24,18 +35,27 @@ export type Experience = {
   role: string;
   org: string;
   dates?: string;
-  location?: string;
   description?: string;
 };
 
 export const site = {
   name: "Atharva Dwivedi",
   firstName: "Atharva",
-  role: "Backend & AI/ML engineer.",
+  role: "Backend & AI/ML engineer",
   location: "Kanpur, UP, India",
   email: "atharvdwivedi8@gmail.com",
+
+  // Used for <meta description> and link previews.
   tagline:
-    "I build systems where Go services meet ML models — then write up what broke, so the next fresher doesn't lose the same week I did.",
+    "Backend systems with ML inside them, built on free tiers and free GPUs. Each project says what it does, how I checked it, and what's still broken.",
+
+  // The three lines at the top of the home page.
+  intro: [
+    "I build backend systems with ML inside them, on free tiers and free GPUs.",
+    "That makes rate limits, daily quotas and session timeouts part of the design, and it's where most of my engineering has gone.",
+    "Each project below says what it does, how I checked it, and what's still broken.",
+  ],
+
   openTo: {
     roles: "backend & AI/ML engineer roles",
     locations: ["Bengaluru", "Delhi NCR", "Mumbai", "remote"],
@@ -48,104 +68,121 @@ export const site = {
     huggingface: "https://huggingface.co/Atharva31",
     leetcode: "https://leetcode.com/atharvdwivedi8",
   },
-  stack: [
-    "Go",
-    "Python",
-    "FastAPI",
-    "PyTorch",
-    "LangGraph",
-    "RAG",
-    "WebSockets",
-    "Docker",
-    "PostgreSQL",
-    "Redis",
-    "ChromaDB",
-    "vLLM",
-  ],
+
   projects: [
     {
+      name: "JobBot",
+      what: "A Telegram bot that pulls jobs from 8 boards, scores them against the skills I actually have, and tailors my LaTeX résumé for the ones worth applying to.",
+      hard: "A tailored résumé must never invent a skill or a number. That's enforced in code, not by asking the model nicely: an allow-list of skills from my own résumé, a guard that rejects any added metric, and a gate that refuses to compile injected LaTeX.",
+      proof:
+        "I ran an adversarial test matrix against my own guards. First run: 0/12 passed. I traced that to 4 bugs, fixed them, and the same 12 cases passed. Zero fabricated skills or numbers in either run. 31 automated tests.",
+      proofLinks: [
+        {
+          label: "raw test results",
+          href: "https://github.com/Atharv-3105/JobBot/blob/HEAD/tests/metrics_output/testing_audit_20260828_222642.json",
+        },
+      ],
+      broken:
+        "The /search crawler path has had less adversarial testing than scoring and tailoring, and a task that's still waiting in the queue can't be cancelled yet.",
+      stack: ["Python", "asyncio", "LangGraph", "SQLite", "LaTeX"],
+      repo: "https://github.com/Atharv-3105/JobBot",
+    },
+    {
       name: "ArchiGen AI",
-      tag: "agents",
-      description:
-        "Multi-agent pipeline that turns a plain-language system description into an Excalidraw architecture diagram, with a self-healing validation loop and streamed output.",
-      stack: ["Python", "FastAPI", "LangGraph", "Groq", "React", "TypeScript"],
+      what: "Describe a system in plain English and get an editable Excalidraw architecture diagram, streamed to the browser stage by stage.",
+      hard: "Models are bad at coordinates, so the LLM only decides structure. Graphviz computes every position, and a plain-code validator checks every arrow and label before you see anything. A diagram that still fails after 3 repair rounds becomes an honest error, not a broken drawing.",
+      proof: "Deployed: FastAPI on Render's free tier, React on Vercel, with sign-in and a daily limit per user. The backend sleeps when idle, so the first diagram can take a minute.",
+      proofLinks: [{ label: "try it live", href: "https://archigenai.vercel.app" }],
+      broken:
+        "Layer ordering isn't enforced yet (an inverted condition in the layout step), and there are no automated tests or evals, so I make no accuracy claims.",
+      stack: ["Python", "FastAPI", "LangGraph", "Graphviz", "React", "SSE"],
       repo: "https://github.com/Atharv-3105/ArchiGen-AI",
     },
     {
       name: "KnowYourRepo",
-      tag: "backend + ml",
-      description: "Paste a GitHub URL, get a call graph, dependency map and a RAG chat over the codebase.",
-      stack: ["Go", "FastAPI", "Postgres", "pgvector", "React"],
+      what: "Paste a GitHub URL and get the repo's symbols, call graph and architecture, plus a chat that answers with file-and-line citations.",
+      hard: "Embedding a whole codebase on a free tier capped at 50 requests a day. Each request carries 128 chunks, progress is saved per file so ingestion resumes the next day, and chat falls back to keyword and call-graph search when embeddings run out.",
+      proof:
+        "gorilla/mux ingests in a few seconds: 17 files, 261 symbols, 2,239 call edges, 31 components. Go and Python services on Postgres + pgvector, with CI and Prometheus metrics.",
+      proofLinks: [{ label: "demo walkthrough", href: "https://github.com/Atharv-3105/KnowYourRepo#readme" }],
+      broken: "Not publicly hosted yet. It runs locally with one docker compose command.",
+      stack: ["Go", "Python", "FastAPI", "Postgres", "pgvector", "React"],
       repo: "https://github.com/Atharv-3105/KnowYourRepo",
     },
     {
+      name: "IndicSLM",
+      what: "A ~22M-parameter language model for Hindi, Marathi and English, built end to end: government-scheme text, a 16K BPE tokenizer, pretraining, SFT, DPO and an eval harness.",
+      hard: "Making it train at all on free Kaggle T4s: a starting loss of 340 instead of 9.7 from a bad init, out-of-memory errors that forced a two-GPU setup, and a session that died mid-run and took a full set of checkpoints with it.",
+      proof: "Evaluated on 90 prompts across the three languages, with the results published as they came out.",
+      proofLinks: [
+        { label: "eval results", href: "https://github.com/Atharv-3105/IndicSLM-From-Scratch-/tree/HEAD/eval/out" },
+      ],
+      broken:
+        "It's knowingly undertrained (4.6 tokens per parameter against ~20 for compute-optimal). With greedy decoding it loops on ~37% of prompts, gets 0% of scheme URLs right, and DPO showed no clear gain.",
+      stack: ["PyTorch", "BPE", "Kaggle T4", "W&B"],
+      repo: "https://github.com/Atharv-3105/IndicSLM-From-Scratch-",
+    },
+  ] satisfies Project[],
+
+  // Smaller projects: one line each.
+  alsoBuilt: [
+    {
       name: "SmartFile-Manager",
-      tag: "backend",
-      description:
-        "Concurrent file-ingestion pipeline in Go with a Python OCR + embedding service for semantic search over local documents.",
-      stack: ["Go", "Python", "EasyOCR", "Sentence-Transformers", "SQLite", "Docker"],
+      line: "Go file watcher + worker pool feeding a Python OCR and embedding service, for semantic search over local files.",
       repo: "https://github.com/Atharv-3105/SmartFile-Manager",
     },
     {
       name: "Semantic-Duel",
-      tag: "real-time",
-      description: "Multiplayer word-battle game over WebSockets where answers are scored by semantic similarity.",
-      stack: ["Go", "WebSockets", "NLP embeddings", "Docker"],
+      line: "Real-time 1v1 word game over WebSockets in Go, scored by embedding similarity.",
       repo: "https://github.com/Atharv-3105/Semantic-Duel",
     },
     {
-      name: "JobBot",
-      tag: "agents",
-      description:
-        "Telegram bot that finds job listings, scores them against a profile and tailors a LaTeX résumé without inventing skills.",
-      stack: ["Python", "LangGraph", "Playwright", "LaTeX"],
-      repo: "https://github.com/Atharv-3105/JobBot",
-    },
-    {
       name: "Language Model Implementations",
-      tag: "ml from scratch",
-      description: "LLaMA-2, Gemma-3 270M and Qwen-3 0.6B rebuilt in PyTorch: GQA, RoPE, RMSNorm, SwiGLU, KV cache.",
-      stack: ["PyTorch"],
+      line: "Gemma 3 270M rebuilt in PyTorch with the official weights loaded and generating text, following Sebastian Raschka's LLMs-from-scratch.",
       repo: "https://github.com/Atharv-3105/Language_Model_Implementations",
     },
-  ] satisfies Project[],
+  ],
+
+  // What I'm working on right now.
+  now: [
+    "Going deep on inference engineering and backend systems: an 8-week plan that only covers things I haven't built before.",
+    "Working through Alex Xu's System Design Interview and implementing each chapter in Go. Each chapter becomes a WhatTheBackend post.",
+  ],
+
   experience: [
     {
       role: "Associate Software Developer",
       org: "Helionyex Solutions",
-      dates: "June 2026 – Present",
-      location: "Remote",
+      dates: "June 2026 – present · remote",
       description:
-        "Core modules for a cross-platform climate-data reception and processing system (Electron, React, TypeScript, PostgreSQL): auth and RBAC, a real-time data-quality validation engine with WMO-compliant QC rules, and secure IPC interfaces.",
+        "Core modules for a cross-platform climate-data reception and processing system: auth and RBAC, a real-time data-quality engine that applies WMO QC rules before readings reach PostgreSQL, and secure IPC between the Electron app's processes.",
     },
     {
       role: "Python & AI Trainer",
       org: "NimbleQ",
-      description: "Mentored 150+ educators on Python and Generative AI fundamentals.",
+      description: "Taught Python and Generative AI fundamentals to 150+ educators.",
     },
     {
       role: "B.Tech, Artificial Intelligence & Machine Learning",
-      org: "Dr. A. P. J. Abdul Kalam Technical University (AKTU)",
+      org: "AKTU",
       dates: "2022 – 2026",
     },
   ] satisfies Experience[],
-  fromScratch:
-    "Transformer, LLaMA 2, ViT, DDPM, U-Net, GANs, VAE, PPO, SAC, TD3, DDPG, MHA, MLA, GQA, LoRA, Qwen, MoEs, DPO.",
-  dsa: "600+ DSA problems on LeetCode",
+
   journal: {
     title: "The learning journal",
     intro:
-      "Build logs from my projects: what I tried, what broke, and how I fixed it. Written for the next fresher who hits the same wall.",
+      "Concepts explained through things I built, written for students who are stuck where I was. Two sections: WhatTheML and WhatTheBackend.",
     sections: {
       ml: {
         title: "WhatTheML",
         nav: "whatTheML",
-        intro: "Models rebuilt from scratch, RAG, fine-tuning and RL: the ML side of the projects, failures included.",
+        intro: "Models from scratch, training on free GPUs, RAG and fine-tuning, explained through my own projects.",
       },
       backend: {
         title: "WhatTheBackend",
         nav: "whatTheBackend",
-        intro: "Go services, concurrency, real-time systems and system design, written up as I hit the walls.",
+        intro: "Go, concurrency, queues, rate limits and system design, explained through my own projects.",
       },
     },
   },

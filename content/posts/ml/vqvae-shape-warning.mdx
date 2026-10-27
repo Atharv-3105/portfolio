@@ -9,6 +9,7 @@ stack: ["PyTorch", "W&B"]
 tags: ["vq-vae", "pytorch", "debugging", "tensor-shapes", "generative-models"]
 level: beginner
 tldr: "F.mse_loss with mismatched shapes only warns, and when the shapes happen to broadcast you get no error at all, just a wrong loss. Print shapes on a dummy batch, assert them before every loss, and only permute a tensor whose layout you're sure of."
+draft: true
 status: "Done · 20 epochs on CIFAR-10"
 ---
 

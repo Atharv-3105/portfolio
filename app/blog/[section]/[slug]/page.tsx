@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ProjectCard } from "@/components/blog/ProjectCard";
 import { DraftBadge } from "@/components/blog/PostRow";
-import { SectionPostsAside, SectionPostsDetails } from "@/components/blog/SectionPostsNav";
 import { Toc } from "@/components/blog/Toc";
 import { renderPostBody } from "@/lib/mdx";
 import { pageMetadata } from "@/lib/meta";
@@ -11,7 +10,6 @@ import {
   getAllPosts,
   getPost,
   getPostsBySection,
-  groupByProject,
   isSection,
   projectAnchor,
   sectionNav,
@@ -58,7 +56,7 @@ export default async function PostPage({ params }: { params: Params }) {
   const post = await load(params);
   if (!post) notFound();
 
-  const groups = groupByProject(getPostsBySection(post.section));
+  const more = getPostsBySection(post.section).filter((p) => p.slug !== post.slug);
   const { prev, next } = getAdjacent(post.section, post.slug);
   const body = await renderPostBody(post.body);
   const meta = toMeta(post);
@@ -76,12 +74,8 @@ export default async function PostPage({ params }: { params: Params }) {
   };
 
   return (
-    <div className="mx-auto w-full max-w-[1280px] px-4 sm:px-6 lg:grid lg:grid-cols-[220px_minmax(0,1fr)_220px] lg:gap-10">
-      <SectionPostsAside section={post.section} groups={groups} current={post.slug} />
-
-      <main id="main" className="min-w-0 pt-8 pb-20 lg:border-x lg:border-line lg:px-10 lg:pt-9">
-        <SectionPostsDetails section={post.section} groups={groups} current={post.slug} />
-
+    <div className="mx-auto w-full max-w-[1180px] px-5 sm:px-8 lg:grid lg:grid-cols-[minmax(0,720px)_220px] lg:justify-between lg:gap-20">
+      <main id="main" className="min-w-0 pt-10 pb-24 sm:pt-14">
         <article className="flex max-w-[720px] flex-col gap-5">
           <nav aria-label="Breadcrumb" className="font-mono text-[13px] text-fg-subtle">
             <ol className="m-0 flex list-none flex-wrap gap-x-2 p-0">
@@ -160,10 +154,29 @@ export default async function PostPage({ params }: { params: Params }) {
               ) : null}
             </nav>
           ) : null}
+
+          {more.length ? (
+            <nav aria-label={`More in ${sectionTitle(post.section)}`} className="mt-14 flex flex-col">
+              <p className="m-0 pb-3 font-mono text-xs text-fg-subtle">{`// more in ${sectionNav(post.section)}`}</p>
+              <ul className="m-0 flex list-none flex-col p-0">
+                {more.map((p) => (
+                  <li key={p.slug}>
+                    <Link
+                      href={p.url}
+                      className="group flex min-h-11 flex-wrap justify-between gap-x-4 border-t border-line py-3.5 text-fg hover:text-fg"
+                    >
+                      <span className="group-hover:text-accent-hover">{p.title}</span>
+                      <span className="font-mono text-xs text-fg-subtle">{p.project}</span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          ) : null}
         </article>
       </main>
 
-      <aside aria-label="On this page and project" className="hidden py-9 lg:block">
+      <aside aria-label="On this page and project" className="hidden pt-14 lg:block">
         <div className="sticky top-6 flex flex-col gap-7">
           <Toc items={post.toc} />
           <ProjectCard post={meta} />

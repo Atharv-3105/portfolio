@@ -9,6 +9,7 @@ stack: ["PyTorch", "Kaggle T4", "BPE", "W&B"]
 tags: ["pretraining", "initialization", "tokenizers", "indic-nlp", "kaggle"]
 level: intermediate
 tldr: "Before any long run, check that step-0 loss is about ln(vocab size). If it's way higher, your init is wrong. With tied embeddings, PyTorch's default nn.Embedding std of 1 is a trap: use N(0, 0.02) and scale the residual projections."
+draft: true
 status: "Trained · DPO and eval done"
 ---
 

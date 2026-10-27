@@ -82,10 +82,10 @@
     margin: 0;
   }
   .prose-journal > * + * {
-    margin-top: 20px;
+    margin-top: 24px;
   }
   .prose-journal h2.journal-h2 {
-    margin-top: 48px;
+    margin-top: 64px;
     font-size: 26px;
     line-height: 1.25;
     font-weight: 600;

@@ -9,6 +9,7 @@ stack: ["Go", "Python", "FastAPI", "Postgres", "pgvector", "OpenRouter"]
 tags: ["go", "rate-limiting", "embeddings", "free-tier", "concurrency"]
 level: intermediate
 tldr: "On a free tier, budget requests, not tokens: pack 128 chunks into each call, share one limiter per API key, save progress after every batch so a run can resume tomorrow, and never let one bad input fail a whole batch."
+draft: true
 status: "In progress"
 ---
 

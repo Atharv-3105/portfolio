@@ -9,6 +9,7 @@ stack: ["PyTorch", "safetensors", "Hugging Face Hub"]
 tags: ["llm", "from-scratch", "weight-loading", "gqa", "rope"]
 level: intermediate
 tldr: "Shape checks can't catch a weight loaded into the wrong layer, because every layer has the same shapes. Compare against a reference on a tiny input before generating anything long. And 'weight tying' by copying a tensor doubles the parameter count: tie by sharing the same Parameter."
+draft: true
 status: "Educational reproductions"
 ---
 
